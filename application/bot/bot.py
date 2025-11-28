@@ -42,65 +42,179 @@ def get_word_form(word, number):
 
 
 def get_today_data():
-    response = requests.get(
-	'https://xn--80aebkobnwfcnsfk1e0h.xn--p1ai/', #'https://xn--90adear.xn--p1ai/',
-        timeout=60,
-        proxies={'https': env('PROXY') or None}
-    )
-    soup = BeautifulSoup(response.text, 'html.parser')
+    try:
+        print("[get_today_data] Starting request...")
+        
+        # Добавляем заголовки, чтобы запрос выглядел более "человеческим"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(
+            'https://xn--80aebkobnwfcnsfk1e0h.xn--p1ai/',
+            timeout=60,
+            proxies={'https': env('PROXY') or None},
+            headers=headers,
+            verify=False	# Если есть проблемы с SSL сертификатами
+        )
+        
+        print(f"[get_today_data] Response status code: {response.status_code}")
+        print(f"[get_today_data] Response headers: {dict(response.headers)}")
+        print(f"[get_today_data] Response encoding: {response.encoding}")
+        print(f"[get_today_data] Response text length: {len(response.text)}")
+        
+        # Сохраняем сырой HTML для отладки
+        with open('debug_response.html', 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        print("[get_today_data] Raw HTML saved to debug_response.html")
+        
+        # Проверяем успешность запроса
+        if response.status_code != 200:
+            print(f"[get_today_data] ERROR: Bad status code: {response.status_code}")
+            print(f"[get_today_data] Response text sample: {response.text[:500]}...")
+            return None
+            
+        # Проверяем, что ответ не пустой
+        if not response.text.strip():
+            print("[get_today_data] ERROR: Empty response")
+            return None
 
-    block_count = soup.find("table", "b-crash-stat")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        print(f"[get_today_data] Soup created, title: {soup.title.string if soup.title else 'No title'}")
 
-    source_date = block_count.find("th").text.strip().split(" ")[-1]
-    date = datetime.datetime.strptime(source_date, '%d.%m.%Y').date()
-    string_date = date.strftime("%-d %B")
-    weekday = date.strftime("%A").lower()
+        # Ищем таблицу с данными
+        block_count = soup.find("table", "b-crash-stat")
+        
+        if not block_count:
+            print("[get_today_data] ERROR: Table 'b-crash-stat' not found")
+            print("[get_today_data] Available tables:")
+            tables = soup.find_all("table")
+            for i, table in enumerate(tables):
+                print(f"Table {i}: classes={table.get('class')}")
+            return None
 
-    data_blocks = block_count.findAll("tr")
-    crashes_num = str(data_blocks[1].findChildren()[1].text)
-    crashes_deaths = str(data_blocks[2].findChildren()[1].text)
-    crashes_child_deaths = str(data_blocks[3].findChildren()[1].text)
-    crashes_injured = str(data_blocks[4].findChildren()[1].text)
-    crashes_child_injured = str(data_blocks[5].findChildren()[1].text)
+        print(f"[get_today_data] Table found: {block_count}")
 
+        # Извлекаем дату
+        date_th = block_count.find("th")
+        if not date_th:
+            print("[get_today_data] ERROR: No 'th' element found in table")
+            return None
+            
+        source_date = date_th.text.strip().split(" ")[-1]
+        print(f"[get_today_data] Extracted date string: '{source_date}'")
+        
+        try:
+            date = datetime.datetime.strptime(source_date, '%d.%m.%Y').date()
+            string_date = date.strftime("%-d %B")
+            weekday = date.strftime("%A").lower()
+        except ValueError as e:
+            print(f"[get_today_data] ERROR: Date parsing failed: {e}")
+            print(f"[get_today_data] Raw date text: '{date_th.text}'")
+            return None
 
-    brief_data_item, created = models.BriefData.objects.update_or_create(
-        date=date,
-        defaults={
-            "dtp_count": crashes_num,
+        print(f"[get_today_data] Parsed date: {date}, string_date: {string_date}, weekday: {weekday}")
+
+        # ПРАВИЛЬНАЯ ПРОВЕРКА ДАТЫ С БАЗОЙ ДАННЫХ
+        print(f"[get_today_data] Checking if we need to update data for date: {date}")
+        
+        try:
+            # Получаем САМУЮ ПОСЛЕДНЮЮ запись из БД (независимо от полученной даты)
+            db_entry_on_date = models.BriefData.objects.filter(date=date).first()
+            
+            if db_entry_on_date:
+                # Запись найдена, выходим из функции
+                print(f"[get_today_data] DB entry on date: {db_entry_on_date.date}")
+                print(f"[get_today_data] Parsed date: {date}")
+                
+                return None
+
+            else:
+                # Записи нет, продолжаем парсинг и обработку данных
+                print(f"[get_today_data] PROCEEDING: No existing entries in DB")
+                
+        except Exception as e:
+            print(f"[get_today_data] ERROR: Failed to check DB: {e}")
+            import traceback
+            print(f"[get_today_data] Traceback: {traceback.format_exc()}")
+            # Продолжаем парсинг в случае ошибки БД
+
+        # Если дошли сюда - парсим данные
+        data_blocks = block_count.findAll("tr")
+        print(f"[get_today_data] Found {len(data_blocks)} table rows")
+        
+        if len(data_blocks) < 6:
+            print("[get_today_data] ERROR: Not enough table rows")
+            for i, row in enumerate(data_blocks):
+                print(f"Row {i}: {row.text.strip()}")
+
+            return None
+
+        try:
+            crashes_num = str(data_blocks[1].findChildren()[1].text).strip()
+            crashes_deaths = str(data_blocks[2].findChildren()[1].text).strip()
+            crashes_child_deaths = str(data_blocks[3].findChildren()[1].text).strip()
+            crashes_injured = str(data_blocks[4].findChildren()[1].text).strip()
+            crashes_child_injured = str(data_blocks[5].findChildren()[1].text).strip()
+            
+            print(f"[get_today_data] Extracted data:")
+            print(f"  Crashes: {crashes_num}")
+            print(f"  Deaths: {crashes_deaths}")
+            print(f"  Child deaths: {crashes_child_deaths}")
+            print(f"  Injured: {crashes_injured}")
+            print(f"  Child injured: {crashes_child_injured}")
+            
+        except IndexError as e:
+            print(f"[get_today_data] ERROR: Data extraction failed: {e}")
+            print("[get_today_data] Table structure:")
+            for i, row in enumerate(data_blocks):
+                children = row.findChildren()
+                print(f"Row {i}: {len(children)} children")
+                for j, child in enumerate(children):
+                    print(f"  Child {j}: '{child.text.strip()}'")
+
+            return None
+
+        # Сохраняем данные в базу
+        created = models.BriefData.objects.update_or_create(
+            date=date,
+            defaults={
+                "dtp_count": crashes_num,
+                "death_count": crashes_deaths,
+                "injured_count": crashes_injured,
+                "child_death_count": crashes_child_deaths,
+                "child_injured_count": crashes_child_injured,
+            }
+        )
+        
+        print(f"[get_today_data] Data saved successfully, created: {created}")
+
+        # Возвращаем полный словарь со всеми необходимыми полями
+        return {
+            "date": date,
+            "string_date": string_date,
+            "weekday": weekday,
+            "crashes_num": crashes_num,
+            "crashes_deaths": crashes_deaths,
+            "crashes_child_deaths": crashes_child_deaths,
+            "crashes_injured": crashes_injured,
+            "crashes_child_injured": crashes_child_injured,
             "death_count": crashes_deaths,
             "injured_count": crashes_injured,
             "child_death_count": crashes_child_deaths,
-            "child_injured_count": crashes_child_injured,
+            "child_injured_count": crashes_child_injured
         }
-    )
 
+    except requests.exceptions.RequestException as e:
+        print(f"[get_today_data] ERROR: Request failed: {e}")
+        return None
 
-#    brief_data_item, created = models.BriefData.objects.get_or_create(
-#        date=date
-#    )
-#    brief_data_item.dtp_count = crashes_num
-#    brief_data_item.death_count = crashes_deaths
-#    brief_data_item.injured_count = crashes_injured
-#    brief_data_item.child_death_count = crashes_child_deaths
-#    brief_data_item.child_injured_count = crashes_child_injured
-#    brief_data_item.save()
-#    print("[get_today_data] brief_data_item: ", brief_data_item)
-#    print("[get_today_data] created: ", created)
+    except Exception as e:
+        print(f"[get_today_data] ERROR: Unexpected error: {e}")
+        import traceback
+        print(f"[get_today_data] Traceback: {traceback.format_exc()}")
+        return None
 
-#    if created:
-    return {
-        "date": date,
-        "weekday": weekday,
-        "string_date": string_date,
-        "crashes_num": crashes_num,
-        "crashes_deaths": crashes_deaths,
-        "crashes_child_deaths": crashes_child_deaths,
-        "crashes_injured": crashes_injured,
-        "crashes_child_injured": crashes_child_injured
-    }
-#    else:
-#        return None
 
 
 def generate_text(data, post_type):
